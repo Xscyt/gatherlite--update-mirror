@@ -1,0 +1,74 @@
+name: GatherLite spiegeln
+
+on:
+  schedule:
+    - cron: '17 5 * * *'   # täglich 05:17 UTC (= 07:17 MESZ / 06:17 MEZ)
+  workflow_dispatch:        # erlaubt manuelles Starten über die Actions-Seite
+
+permissions:
+  contents: write           # nötig, um Releases im eigenen Repo anzulegen
+
+env:
+  UPSTREAM_REPO: Wuild/GatherLite          # Original-Repo
+  TAG_FILTER: '^[0-9]+(\.[0-9]+)+$'        # nur Tags wie 8.2.0 zählen als Version
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Neuesten Tag beim Original ermitteln
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          latest=$(git ls-remote --tags --refs "https://github.com/${UPSTREAM_REPO}.git" \
+                    | sed 's#.*refs/tags/##' \
+                    | grep -E "$TAG_FILTER" \
+                    | sort -rV | head -n 1 || true)
+          if [ -z "$latest" ]; then
+            echo "::error::Kein passender Tag in ${UPSTREAM_REPO} gefunden - TAG_FILTER pruefen."
+            exit 1
+          fi
+          echo "Neuester Tag beim Original: $latest"
+          echo "tag=$latest" >> "$GITHUB_OUTPUT"
+          if gh release view "$latest" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $latest existiert bereits - nichts zu tun."
+            echo "new=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "new=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Quellcode des Originals am Tag holen
+        if: steps.check.outputs.new == 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.UPSTREAM_REPO }}
+          ref: refs/tags/${{ steps.check.outputs.tag }}
+          path: upstream
+          fetch-depth: 0
+
+      - name: Addon-Zip bauen (ohne Upload irgendwohin)
+        if: steps.check.outputs.new == 'true'
+        uses: BigWigsMods/packager@v2
+        with:
+          args: -d -t upstream
+          pandoc: 'false'
+
+      - name: Release im eigenen Repo anlegen
+        if: steps.check.outputs.new == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.check.outputs.tag }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          zips=(upstream/.release/*.zip)
+          if [ ${#zips[@]} -eq 0 ]; then
+            echo "::error::Kein Zip gefunden - Packager-Log pruefen."
+            exit 1
+          fi
+          gh release create "$TAG" "${zips[@]}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "GatherLite $TAG" \
+            --notes "Automatisch gebaut aus https://github.com/${UPSTREAM_REPO}/tree/${TAG}"
